@@ -1,0 +1,406 @@
+---
+title: "Supplemental Analyses"
+author: "Jesse H. Krijthe"
+date: "1/10/2019"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(broom)
+library(stringr)
+source("R/tools.R")
+source("R/dlmTrend.R")
+load("data.RData")
+
+theme_custom <- function() {
+    theme_bw() +
+    theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+}
+```
+
+# Effect of Time Since Last Dose on Measurements
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>% 
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6) %>% 
+  ggplot(aes(x=Month,y=ANNUAL_TIME_BTW_DOSE_NUPDRS)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_custom()
+```
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>% 
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6) %>% 
+  left_join(freqs) %>% 
+  ggplot(aes(x=Freq,y=ANNUAL_TIME_BTW_DOSE_NUPDRS)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_custom()
+  #ggplot(aes(x=ANNUAL_TIME_BTW_DOSE_NUPDRS,y=MDS_UPDRS_III)) +
+```
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>%
+  filter(!is.na(ANNUAL_TIME_BTW_DOSE_NUPDRS)) %>% 
+  left_join(subject_characteristics,by="PATNO") %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  count(Center,ANNUAL_TIME_BTW_DOSE_NUPDRS<6) %>% 
+  spread(`ANNUAL_TIME_BTW_DOSE_NUPDRS < 6`,n) %>% 
+  arrange(desc(`TRUE`))
+```
+
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>%
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6,ANNUAL_TIME_BTW_DOSE_NUPDRS<30) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  left_join(subject_characteristics,by="PATNO") %>% 
+  ggplot(aes(x=ANNUAL_TIME_BTW_DOSE_NUPDRS,y=MDS_UPDRS_III)) +
+  geom_point() +
+  #geom_text(aes(label=Center)) +
+  geom_smooth(method="lm") +
+  theme_custom() +
+  #coord_cartesian(xlim=c(0,20))
+  NULL
+```
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>%
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6,ANNUAL_TIME_BTW_DOSE_NUPDRS<30) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  left_join(subject_characteristics,by="PATNO") %>% 
+  lm(MDS_UPDRS_III~ANNUAL_TIME_BTW_DOSE_NUPDRS,data=.) %>% summary
+```
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Ag") %>% 
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6) %>% 
+  ggplot(aes(x=ANNUAL_TIME_BTW_DOSE_NUPDRS,y=MDS_UPDRS_III)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_custom()
+```
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Ag") %>% 
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6) %>% 
+lm(MDS_UPDRS_III~ANNUAL_TIME_BTW_DOSE_NUPDRS,data=.) %>% summary
+```
+
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv") %>% 
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6) %>% 
+  left_join(ledds,by = c("PATNO", "EVENT_ID")) %>% 
+  left_join(subject_characteristics, by = "PATNO") %>% 
+  lm(MDS_UPDRS_III~ANNUAL_TIME_BTW_DOSE_NUPDRS+MDS_UPDRS_II+NHY,data=.) %>% summary
+```
+
+```{r}
+mds_total %>% 
+  filter(PD_MED_USE!="None") %>% 
+  filter(PD_MED_USE!="Other") %>% 
+  filter(PD_MED_USE=="Lv" | PD_MED_USE=="Ag") %>%
+  filter(ANNUAL_TIME_BTW_DOSE_NUPDRS>6,ANNUAL_TIME_BTW_DOSE_NUPDRS<30) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  #left_join(subject_characteristics) %>%
+  gather(Outcome,Value,MDS_UPDRS_II,MDS_UPDRS_III) %>% 
+  ggplot(aes(x=ANNUAL_TIME_BTW_DOSE_NUPDRS,y=Value)) +
+  geom_point() +
+  #geom_text(aes(label=Center)) +
+  geom_smooth(method="lm") +
+  facet_grid(Outcome~PD_MED_USE,scales = "free_y") +
+  theme_custom() +
+  #coord_cartesian(xlim=c(0,20))
+  NULL
+```
+
+# Difference in  Patient vs. Caregiver Reporting
+```{r}
+#mds_12 %>% count(NUPSOURC_1,NUPSOURC_1P)
+#mds_12 %>% count(NUPSOURC_1,NUPSOURC_1P,NUPSOURC_2)
+
+mds_12 %>% 
+  count(EVENT_ID,NUPSOURC_1) %>% 
+  spread(NUPSOURC_1,n) %>% 
+  mutate(`3`/(`3`+`1`))
+
+df_p <- mds_12 %>% 
+  left_join(subject_characteristics, by="PATNO") %>% 
+  filter(ENROLL_CAT=="PD") %>%
+  filter(EVENT_ID %in% c("SC","BL",paste0("V0",1:9),"V10","V11","V12")) %>% 
+  group_by(PATNO) %>% 
+  summarize(patient=sum(NUPSOURC_1==1,na.rm=TRUE),
+            caregiver=sum(NUPSOURC_1==2,na.rm=TRUE),
+            both=sum(NUPSOURC_1==3,na.rm=TRUE)) %>% 
+  ungroup %>% 
+  mutate(tot=patient+caregiver+both) %>% 
+  mutate(afw=tot-pmax(patient,caregiver,both)) %>% 
+  filter(afw!=0)
+  
+  
+mds_12 %>% 
+  left_join(subject_characteristics, by="PATNO") %>% 
+  filter(ENROLL_CAT=="PD") %>%
+  filter(EVENT_ID %in% c("SC","BL",paste0("V0",1:9),"V10","V11","V12")) %>% 
+  filter(PATNO %in% df_p$PATNO) %>% 
+  arrange(PATNO) %>% 
+  select(PATNO,EVENT_ID,NUPSOURC_1) %>% 
+  spread(EVENT_ID,NUPSOURC_1)
+
+mds_12 %>% 
+  left_join(subject_characteristics, by="PATNO") %>% 
+  filter(ENROLL_CAT=="PD") %>%
+  filter(EVENT_ID %in% c("SC","BL",paste0("V0",1:9),"V10","V11","V12")) %>% 
+  mutate(patientrec=(NUPSOURC_2==1)) %>% 
+    mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  left_join(mds_3) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  lm(MDS_UPDRS_III~patientrec+Month,data=.) %>% summary
+  
+```
+
+```{r}
+mds_12 %>% 
+  left_join(subject_characteristics, by="PATNO") %>% 
+  mutate(Part1_1=NP1COG + NP1HALL + NP1DPRS + NP1ANXS + NP1APAT + NP1DDS) %>% 
+  mutate(Part1_2=NP1SLPN + NP1SLPD + NP1PAIN + NP1URIN + NP1CNST + NP1LTHD + NP1FATG) %>% 
+  filter(ENROLL_CAT=="PD") %>%
+  filter(EVENT_ID %in% c("SC","BL",paste0("V0",1:9),"V10","V11","V12")) %>% 
+  mutate(patientrec=(NUPSOURC_1==1)) %>% 
+    mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  left_join(mds_3, by = c("PATNO", "EVENT_ID")) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  lm(Part1_1~patientrec+Month,data=.) %>% summary
+```
+
+```{r}
+mds_12 %>% 
+  left_join(subject_characteristics,by="PATNO") %>% 
+  mutate(Part1_1=NP1COG + NP1HALL + NP1DPRS + NP1ANXS + NP1APAT + NP1DDS) %>% 
+  mutate(Part1_2=NP1SLPN + NP1SLPD + NP1PAIN + NP1URIN + NP1CNST + NP1LTHD + NP1FATG) %>% 
+  filter(ENROLL_CAT=="PD") %>%
+  filter(EVENT_ID %in% c("SC","BL",paste0("V0",1:9),"V10","V11","V12")) %>% 
+  mutate(patientrec=(NUPSOURC_1P==1)) %>% 
+    mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  left_join(mds_3, by = c("PATNO", "EVENT_ID")) %>% 
+  filter(PAG_NAME=="NUPDRS3") %>% 
+  lm(Part1_2~patientrec+Month,data=.) %>% summary
+```
+
+# Model check 2
+
+```{r}
+load("bootstrap-data.RData")
+
+# Fill in NAs for missing values, take the difference and plot
+df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  ggplot(aes(x=y2y1,y=y3y2)) +
+  geom_point(size=3,alpha=0.1,na.rm = TRUE) +
+  geom_smooth(method="lm",na.rm = TRUE,se = FALSE,color="red") +
+  facet_wrap(~Measurement) +
+  labs(x=expression(y[2]-y[1]),
+       y=expression(y[3]-y[2])) +
+  theme_bw(base_family = "Lato") +
+  coord_equal(xlim=c(-30,30),ylim=c(-30,30)) +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+  
+
+generate_dlm_data(n_subjects = 451,n_obs = 3, m0 = 20.16, C0 = 57.44, V = 15.52, W=31.13, intercept = 2.63)$Y %>% 
+  as_data_frame() %>% 
+  rownames_to_column(var = "PATNO") %>% 
+  mutate(Measurement="MDS UPDRS III off") %>% 
+  gather(Month,Score,-PATNO,-Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  ggplot(aes(x=y2y1,y=y3y2)) +
+  geom_point(size=3,alpha=0.1,na.rm = TRUE) +
+  geom_smooth(method="lm",na.rm = TRUE,se = FALSE,color="red") +
+  facet_wrap(~Measurement) +
+  labs(x=expression(y[2]-y[1]),
+       y=expression(y[3]-y[2])) +
+  coord_equal(xlim=c(-30,30),ylim=c(-30,30)) +
+  theme_custom()
+```
+
+```{r}
+df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  filter(!is.na(y2y1),!is.na(y3y2)) %>% 
+  nrow
+
+slope_real <- df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  lm(y3y2~y2y1,data=.) %>% summary %>% tidy %>% 
+  .$estimate %>% .[[2]]
+
+#df_yearly_long %>% .$Month %>% unique
+
+get_slope <- function(i) { generate_dlm_data(n_subjects = 451,n_obs = 3, m0 = 20.16, C0 = 57.44, V = 15.52, W=31.13, intercept = 2.63)$Y %>% 
+  as_data_frame() %>% 
+  tibble::rownames_to_column(var = "PATNO") %>% 
+  mutate(Measurement="MDS UPDRS III off") %>% 
+  gather(Month,Score,-PATNO,-Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  lm(y3y2~y2y1,data=.) %>% tidy %>% 
+  .$estimate %>% .[[2]]
+}
+
+sims <- data_frame(slope=map_dbl(1:1000,get_slope))
+sims
+sum(sims$slope<slope_real)
+sims %>% 
+  ggplot(aes(x=slope)) +
+  geom_histogram(bins=50) +
+  geom_vline(xintercept = slope_real) +
+  theme_custom()
+```
+
+# Constant mean and variance change scores
+```{r}
+meanvar <- df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  group_by(Measurement,Month) %>% 
+  summarize(m=mean(y2y1,na.rm=TRUE),s=sd(y2y1,na.rm=TRUE),m_se=s/sqrt(sum(!is.na(y2y1)))) %>% 
+  ungroup
+
+meanvar %>% 
+  ggplot(aes(x=m, y=Month)) +
+  geom_point() +
+  coord_flip() +
+  geom_segment(aes(x=m-1.96*m_se,xend=m+1.96*m_se,yend=Month)) +
+  facet_wrap(Measurement~.) +
+  xlab("Change in Score") +
+  theme_custom()
+
+meanvar %>% 
+  filter(Month!=0) %>% 
+  select(Measurement,Month,s) %>% 
+  spread(Month,s) %>% kable
+```

@@ -1,0 +1,1298 @@
+---
+title: "Estimating MDS-UPDRS Measurement Error in the PPMI dataset"
+author: "Jesse H. Krijthe & Luc Evers"
+output:
+  html_document:
+    toc: yes
+    self_contained: no
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE,cache.lazy = FALSE)
+library(tidyverse)
+library(broom)
+library(lme4)
+library(stringr)
+library(broom.mixed)
+source("R/tools.R")
+source("R/dlmTrend.R")
+load("data.RData")
+```
+
+
+# Data Preparation
+We remove subject 54854 who has multiple entries in the subject characteristics database (and lots of missing values). Subject 41635 has two entries in this database, of which we select the first.
+
+We test two criteria to determine whether a measurement was done in "On" or "Off" state. Our main criterion "Strict" defines "Off" as no medication or last dose at least 6 hours ago. "Stricter" is similar but with a threshold at 14 hours.
+
+If there are two measurements of the same type (On/Off), we pick the one that corresponds to the intent indicated by the choice of the form (NUPDRS3A or NUPDRS3). An alternative would be to add the second measurement as well by adding a small increment to the indicator of time, as if the second measurement was carried out a few days after the first measurement.
+
+```{r prepare-data}
+df_traj <- 
+  mds_total %>% 
+  left_join(subject_characteristics %>% distinct(PATNO,.keep_all=TRUE), by="PATNO") %>% 
+  filter(PATNO!=54854) %>% 
+  filter(ENROLL_CAT=="PD") %>% 
+  filter(!is.na(Month)) %>% 
+  mutate(onoff = case_when(
+    PD_MED_USE == "None" & PAG_NAME=="NUPDRS3" ~ "Off", # Four patients where other form is used
+    PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr" & PAG_NAME=="NUPDRS3" ~ "Off",
+    PD_MED_USE != "None" & ON_OFF_DOSE == "<6hr" & PAG_NAME=="NUPDRS3A" ~ "On",
+    PD_MED_USE != "None" & ON_OFF_DOSE == "<6hr" & PAG_NAME!="NUPDRS3A" ~ "Off_tooshort",
+    PD_MED_USE != "None" & is.na(ON_OFF_DOSE) & PAG_NAME=="NUPDRS3" ~ "Off_missingtime",
+    PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr" & PAG_NAME=="NUPDRS3A" ~ "On_toolong",
+    PD_MED_USE != "None" & is.na(ON_OFF_DOSE) & PAG_NAME=="NUPDRS3A" ~ "On_missingtime",
+    is.na(PAG_NAME) ~ "No_Page",
+    TRUE ~ NA_character_
+  )) %>% 
+  mutate(stricter_onoff = case_when(
+    PD_MED_USE == "None" & PAG_NAME=="NUPDRS3" ~ "Off",
+    PD_MED_USE != "None" & ANNUAL_TIME_BTW_DOSE_NUPDRS >= 14 & PAG_NAME=="NUPDRS3" ~ "Off",
+    PD_MED_USE != "None" & ON_OFF_DOSE == "<6hr" & PAG_NAME=="NUPDRS3A" ~ "On",
+    PD_MED_USE != "None" & ANNUAL_TIME_BTW_DOSE_NUPDRS < 14 & PAG_NAME!="NUPDRS3A" ~ "Off_tooshort",
+    PD_MED_USE != "None" & is.na(ON_OFF_DOSE) & PAG_NAME=="NUPDRS3" ~ "Off_missingtime",
+    PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr" & PAG_NAME=="NUPDRS3A" ~ "On_toolong",
+    PD_MED_USE != "None" & is.na(ON_OFF_DOSE) & PAG_NAME=="NUPDRS3A" ~ "On_missingtime",
+    is.na(PAG_NAME) ~ "No_Page",
+    TRUE ~ NA_character_
+  ))
+
+#df_traj %>% {table(.$Month,.$PAG_NAME,useNA = "always")}
+df_traj %>% {table(.$Month,.$onoff,useNA = "always")} %>% kable(caption="Number of Off and On measurements and reasons for exclusion.")
+
+# Merge the missingness categories into NA
+df_traj <- 
+  df_traj %>% 
+  mutate(onoff=factor(onoff,c("On","Off")),
+         stricter_onoff=factor(stricter_onoff,c("On","Off")))
+
+df_long <- 
+  df_traj %>% 
+  select(PATNO, ENROLL_CAT, EVENT_ID, Month, onoff, starts_with("MDS_UPDRS_I")) %>% 
+  distinct(PATNO,EVENT_ID,onoff,.keep_all=TRUE) %>% 
+  spread(onoff, MDS_UPDRS_III) %>% 
+  rename(MDS_UPDRS_III_on=On, MDS_UPDRS_III_off=Off) %>% 
+  #count(PATNO,EVENT_ID) %>% arrange(desc(n))
+  select(PATNO, Month, starts_with("MDS_UPDRS")) %>% 
+  gather("Measurement","Score",-Month,-PATNO,) %>% 
+  filter(!is.na(Score))
+
+df_yearly_long <- df_long %>% 
+  filter(Month %in% c(-1,0,12,24,36,48,60))
+
+df_stricter_long <- df_traj %>% 
+  select(PATNO, ENROLL_CAT, EVENT_ID, Month, stricter_onoff, starts_with("MDS_UPDRS_I")) %>% 
+  distinct(PATNO,EVENT_ID,stricter_onoff,.keep_all=TRUE) %>% 
+  spread(stricter_onoff, MDS_UPDRS_III) %>% 
+  rename(MDS_UPDRS_III_on=On, MDS_UPDRS_III_off=Off) %>% 
+  select(PATNO, Month, starts_with("MDS_UPDRS_I")) %>% 
+  gather("Measurement","Score",-Month,-PATNO) %>% 
+  na.omit %>% 
+  filter(Month %in% c(-1,0,12,24,36,48,60))
+
+# Check all rows of stricter are in yearly:
+#df_stricter_long %>% dim
+#intersect(df_stricter_long,df_yearly_long) %>% dim
+
+df_yearly_long$strictly <- do.call(paste0, df_yearly_long) %in% do.call(paste0, df_stricter_long)
+  
+# Check number of measurements is the same for parts I, II and IV
+bind_rows(Strict = df_long %>% .$Measurement %>% table,
+          Stricter = df_stricter_long %>% .$Measurement %>% table,
+          Yearly = df_yearly_long %>% .$Measurement %>% table,.id="Criterion") %>% 
+  kable(caption="Total number of measurements")
+```
+
+## Missing Time since last dose
+```{r}
+df_traj %>% 
+  select(PD_MED_USE,ANNUAL_TIME_BTW_DOSE_NUPDRS,Month) %>% 
+  count(Month,missing=is.na(ANNUAL_TIME_BTW_DOSE_NUPDRS),med=(PD_MED_USE=="None")) %>%
+  mutate(missing=factor(missing,c(TRUE,FALSE),c("Missing_Time","Time")),
+         med=factor(med,c(TRUE,FALSE),c("No_Medication","Medication"))) %>% 
+  unite("Missing_Time_Medication",med,missing) %>% 
+  spread(Missing_Time_Medication,n) %>% 
+  kable
+```
+
+Using the used form as the criterion on which to judge on/off state allows for many more observations to be included, which mostly come from the time points at 9,18,30,42,54 months. However, these are observations for which we mostly do not know the time since the last dose was taken.
+
+## PCA & Factor Analysis
+We calculate principal components and components after applying a varimax rotation on the principal components. To do this, we use data from PD patients and only take into account 'Off' measurements. Loadings are printed with a cutoff of 0.2.
+```{r}
+df_pca1 <- 
+  mds_1 %>% 
+  left_join(subject_characteristics %>% distinct(PATNO,.keep_all=TRUE), by="PATNO") %>% 
+  filter(ENROLL_CAT=="PD") %>% 
+  filter(PATNO!=54854) %>% 
+  mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  filter(!(EVENT_ID %in% c("ST","U01","PW","V13")))
+  #filter(!(EVENT_ID %in% c("ST","U01","PW","V13","SC","BL","V01","V02","V03")))
+
+df_pca2 <- 
+  mds_2 %>% 
+  left_join(subject_characteristics %>% distinct(PATNO,.keep_all=TRUE), by="PATNO") %>% 
+  mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  )) %>% 
+  filter(ENROLL_CAT=="PD") %>% 
+  filter(PATNO!=54854) %>% 
+  filter(!(EVENT_ID %in% c("ST","U01","PW","V13")))
+
+df_pca3 <- 
+  mds_total %>%
+  left_join(mds_3 %>% select(-ON_OFF_DOSE,-PD_MED_USE,-PAG_NAME),by=c("PATNO", "EVENT_ID")) %>% 
+  left_join(subject_characteristics %>% distinct(PATNO,.keep_all=TRUE), by="PATNO") %>% 
+  filter(ENROLL_CAT=="PD") %>% 
+  filter(PATNO!=54854) %>% 
+  mutate(onoff = case_when(
+    PD_MED_USE == "None" & PAG_NAME=="NUPDRS3" ~ "Off",
+    PD_MED_USE != "None" & ON_OFF_DOSE == ">=6hr" & PAG_NAME=="NUPDRS3" ~ "Off",
+    TRUE ~ NA_character_
+  )) %>% 
+  filter(onoff=="Off") %>% 
+  filter(Month %in% c(-1,0,12,24,36,48,60))
+```
+
+### Varimax
+```{r, results="asis"}
+res_varimax1 <- 
+  df_pca1 %>% 
+  select(NP1SLPN,NP1SLPD,NP1COG,NP1PAIN,NP1HALL,NP1URIN,NP1CNST,
+         NP1DDS,NP1LTHD,NP1FATG,NP1DPRS,NP1ANXS,NP1APAT
+) %>% 
+  #psych::fa.parallel()
+  psych::principal(3,rotate = "varimax",normalize=FALSE,eps=1e-14)
+  #psych::scree()
+res_varimax1$loadings %>% kable_loadings(cutoff=0.2)
+
+res_varimax2 <- 
+  df_pca2 %>% 
+  select(NP2SPCH,NP2SALV,NP2SWAL,NP2HWRT,NP2HOBB,NP2EAT,NP2TRMR,NP2DRES,NP2HYGN,NP2TURN,NP2RISE,NP2WALK,NP2FREZ
+) %>% 
+  #psych::fa.parallel()
+  psych::principal(3,rotate = "varimax",normalize=TRUE,eps=1e-14) 
+res_varimax2$loadings %>% kable_loadings(cutoff=0.2)
+
+res_varimax3 <- 
+  df_pca3 %>% 
+  select(NP3FTAPL,NP3HMOVL,NP3PRSPL,NP3TTAPL,NP3LGAGL,NP3FTAPR,NP3HMOVR,NP3PRSPR,
+         NP3TTAPR,NP3LGAGR,
+         NP3FRZGT,NP3GAIT,NP3PSTBL,NP3POSTR,NP3RISNG,
+          NP3BRADY,NP3FACXP,NP3SPCH,
+          NP3RTALJ,NP3RTALL,NP3RTALU,NP3RTARL,NP3RTARU,NP3RTCON,
+          NP3KTRML,NP3KTRMR,NP3PTRML,NP3PTRMR,
+          NP3RIGLL,NP3RIGLU,NP3RIGN,NP3RIGRU,PN3RIGRL
+) %>% 
+  #as.matrix %>% 
+  #psych::fa.parallel()
+  psych::principal(7,rotate = "varimax",normalize=FALSE,eps=1e-14) 
+res_varimax3$loadings %>% kable_loadings(cutoff=0.2)
+```
+
+### PCA
+```{r, results="asis"}
+res_pca3 <- 
+  df_pca3 %>% 
+  select(NP3FTAPL,NP3HMOVL,NP3PRSPL,NP3TTAPL,NP3LGAGL,NP3FTAPR,NP3HMOVR,NP3PRSPR,
+         NP3TTAPR,NP3LGAGR,
+         NP3FRZGT,NP3GAIT,NP3PSTBL,NP3POSTR,NP3RISNG,
+          NP3BRADY,NP3FACXP,NP3SPCH,
+          NP3RTALJ,NP3RTALL,NP3RTALU,NP3RTARL,NP3RTARU,NP3RTCON,
+          NP3KTRML,NP3KTRMR,NP3PTRML,NP3PTRMR,
+          NP3RIGLL,NP3RIGLU,NP3RIGN,NP3RIGRU,PN3RIGRL
+) %>% 
+  psych::principal(7,rotate = "none",normalize=FALSE,eps=1e-14) 
+res_pca3$loadings %>% kable_loadings(cutoff=0.2)
+```  
+
+```{r factors-combine}
+df_factors1 <- 
+  res_varimax1 %>% 
+  .$scores %>% 
+  as_data_frame %>%
+  set_names(paste0("F1.",1:length(.))) %>% 
+  bind_cols(df_pca1)
+
+df_factors2 <- 
+  res_varimax2 %>% 
+  .$scores %>% 
+  as_data_frame %>%
+  set_names(paste0("F2.",1:length(.))) %>% 
+  bind_cols(df_pca2)
+
+df_factors3 <- 
+  res_varimax3 %>% 
+  .$scores %>% 
+  as_data_frame %>%
+  set_names(paste0("F3.",1:length(.))) %>% 
+  bind_cols(df_pca3)
+
+df_factors_long1 <- df_factors1 %>% 
+  select(PATNO, Month, starts_with("F1")) %>% 
+  gather("Measurement","Score",-Month,-PATNO) %>% 
+  na.omit
+
+df_factors_long2 <- df_factors2 %>% 
+  select(PATNO, Month, starts_with("F2")) %>% 
+  gather("Measurement","Score",-Month,-PATNO) %>% 
+  na.omit
+
+df_factors_long3 <- df_factors3 %>% 
+  select(PATNO, ENROLL_CAT, EVENT_ID, Month, onoff, starts_with("F3")) %>% 
+  distinct(PATNO,EVENT_ID,onoff,.keep_all = TRUE) %>% 
+  select(PATNO, Month, starts_with("F3")) %>% 
+  gather("Measurement","Score",-Month,-PATNO) %>% 
+  na.omit
+```
+
+## Save datasets for bootstrap estimation
+```{r}
+# Remove parts I, II and IV from the alternative criteria, so that we do not do calculations twice
+df_yearly_long <- df_yearly_long %>% filter(Measurement != "MDS_UPDRS_IV")
+df_factors_long <- bind_rows(df_factors_long1,df_factors_long2,df_factors_long3)
+df_long <- df_long %>% filter(Measurement != "MDS_UPDRS_IV", Measurement != "MDS_UPDRS_III_on")
+df_factors_long$Measurement %>% unique
+
+save(df_long, df_factors_long, df_yearly_long, file="bootstrap-data.RData")
+```
+
+## Visualizing the data
+
+```{r example-paths, fig.height=8,fig.width=4}
+set.seed(42)
+df_paths <- bind_rows(df_long %>% filter(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II")),
+          df_yearly_long %>% filter(Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off")))
+
+
+selected_patno <-  df_paths %>% 
+  filter(Measurement=="MDS_UPDRS_III_off") %>% 
+  count(PATNO) %>% 
+  filter(n>5) %>% 
+  .$PATNO %>% 
+  sample(8)
+
+# selected_patno <- df_paths %>% 
+#   .$PATNO %>% unique %>% 
+#   sample(8)
+
+# Filter on complete paths
+
+df_paths %>% 
+  filter(Measurement!="MDS_UPDRS_IV") %>% 
+  filter(PATNO %in% selected_patno) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  ggplot(aes(x=Month,y=Score,color=factor(PATNO))) +
+  geom_point() +
+  geom_line(aes(group=PATNO)) +
+  facet_wrap(~Measurement,ncol=1,scales="free_y") +
+  scale_color_grey() +
+  theme_bw(base_family = "Lato") +
+  #coord_equal() +
+  scale_x_continuous(breaks=seq(0,60,12)) +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_blank() #element_text(face="bold")
+        )
+
+df_paths %>% 
+  filter(Measurement!="MDS_UPDRS_IV") %>%
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  group_by(Measurement,Month) %>% 
+  summarize(median=median(Score),
+            q40=quantile(Score,0.4),
+            q60=quantile(Score,0.6),
+            q25=quantile(Score,0.25),
+            q75=quantile(Score,0.75)) %>% 
+  ungroup %>% 
+  ggplot(aes(x=Month,y=median)) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin=q40,ymax=q60),alpha=0.2) +
+  geom_ribbon(aes(ymin=q25,ymax=q75),alpha=0.2) +
+  facet_wrap(~Measurement,ncol=1,scales="free_y") +
+  scale_color_grey() +
+  theme_bw(base_family = "Lato") +
+  #coord_equal() +
+  scale_x_continuous(breaks=seq(0,60,12)) +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_blank()#, element_text(face="bold")
+        ) +
+  ylab("Median Score")
+```
+
+## Difference plot
+```{r}
+# Fill in NAs for missing values, take the difference and plot
+df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  ggplot(aes(x=y2y1,y=y3y2)) +
+  geom_point(size=3,alpha=0.1,na.rm = TRUE) +
+  geom_smooth(method="lm",na.rm = TRUE,se = FALSE,color="red") +
+  facet_wrap(~Measurement) +
+  labs(x=expression(y[2]-y[1]),
+       y=expression(y[3]-y[2])) +
+  theme_bw(base_family = "Lato") +
+  coord_equal() +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+
+
+
+pc_res <- df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  select(y2y1,y3y2) %>%
+  as.matrix %>% 
+  na.omit %>% 
+  prcomp()
+
+pcval <- pc_res$rotation
+mval <- pc_res$center
+
+df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(Score)-Score) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS III off") %>% 
+  ggplot(aes(x=y2y1,y=y3y2)) +
+  geom_point(size=3,alpha=0.1,na.rm = TRUE) +
+  geom_abline(slope=pcval[2,1]/pcval[1,1],
+              intercept=mval[2]-mval[1]*pcval[2,1]/pcval[1,1],color="red") +
+    # geom_abline(slope=pcval[2,2]/pcval[1,2],
+    #           intercept=mval[2]-mval[1]*pcval[2,2]/pcval[1,2],color="blue") +
+  #geom_point(x=mval[1],y=mval[2],color="green") + # Mean
+  facet_wrap(~Measurement) +
+  labs(x=expression(y[2]-y[1]),
+       y=expression(y[3]-y[2])) +
+  theme_bw(base_family = "Lato") +
+  coord_equal() +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+```
+
+Differences taken between values at yearly visits. In the second plot we show the first pricipal component of the differences.
+
+
+# Changes vs. LEDD changes
+```{r fig.height=4, fig.width=4}
+# Fill in NAs for missing values, take the difference and plot
+
+ledds_m <- ledds %>% 
+    mutate(Month = case_when(
+    EVENT_ID=="SC" ~ -1,
+    EVENT_ID=="BL" ~ 0,
+    EVENT_ID=="V01" ~ 3,
+    EVENT_ID=="V02" ~ 6,
+    EVENT_ID=="V03" ~ 9,
+    EVENT_ID=="V04" ~ 12,
+    EVENT_ID=="V05" ~ 18,
+    EVENT_ID=="V06" ~ 24,
+    EVENT_ID=="V07" ~ 30,
+    EVENT_ID=="V08" ~ 36,
+    EVENT_ID=="V09" ~ 42,
+    EVENT_ID=="V10" ~ 48,
+    EVENT_ID=="V11" ~ 54,
+    EVENT_ID=="V12" ~ 60,
+    TRUE ~ NA_real_
+  ))
+
+df_yearly_long %>% 
+  filter(Month!=-1) %>% 
+  left_join(ledds_m, by = c("PATNO", "Month")) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  complete(PATNO,Month,Measurement) %>% 
+  group_by(PATNO,Measurement) %>% 
+  arrange(PATNO,Measurement,Month) %>% 
+  mutate(y2y1=Score-lag(Score),y3y2=lead(LEDD)-LEDD) %>% 
+  ungroup %>% 
+  filter(Measurement=="MDS UPDRS I") %>% 
+  #filter(y3y2!=0) %>% 
+  {cor(.$y2y1,.$y3y2,use = "complete.obs")}
+  
+# ggplot(aes(x=y2y1,y=y3y2)) +
+#   geom_point(size=3,alpha=0.1,na.rm = TRUE) +
+#   geom_smooth(method="lm",na.rm = TRUE,se = FALSE,color="red") +
+#   facet_wrap(~Measurement) +
+#   labs(x=expression(y[2]-y[1]),
+#        y=expression(y[3]-y[2])) +
+#   theme_bw(base_family = "Lato") +
+#   #coord_equal() +
+#   theme(legend.position = "none",
+#         legend.background = element_rect(colour = "black",size = 0.1),
+#         panel.grid.major = element_line(linetype = 2, size=0.2),
+#         panel.grid.minor = element_line(linetype = 2, size=0.2),
+#         panel.border = element_blank(),
+#         axis.line = element_line(linetype=1,color="black",size=0.5),
+#         strip.background = element_rect(fill=NA,color=NA),
+#         strip.text = element_text(face="bold")
+#         )
+```
+
+
+## Number of Measurements
+```{r}
+# Number of times form used at each time point
+df_traj %>% 
+  count(EVENT_ID,PAG_NAME) %>% 
+  spread(PAG_NAME,n) %>% 
+  kable(caption="Number of times form is used")
+
+# Hours since last dose for the two forms used
+df_traj %>% 
+  ggplot(aes(ANNUAL_TIME_BTW_DOSE_NUPDRS,fill=PAG_NAME)) +
+  geom_histogram(bins = 100,na.rm = TRUE) +
+  theme_bw(base_family = "Lato") +
+  ggtitle("Time Since Dose vs. Evaluation Form Used",
+          subtitle = "Large number of observations with missing time since dose not shown") +
+  ylab("Number of Observations") +
+  xlab("Time since last dose (Hrs)") +
+  scale_fill_discrete(name="Form Used") +
+  theme(legend.position = c(0.8,0.8),
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5)
+        )
+```
+
+```{r plot-number, fig.width=4,fig.height=6}  
+# Based on strict definition
+bind_rows(df_long %>% filter(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II")),
+          df_yearly_long %>% filter(Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off"))) %>% 
+  group_by(Measurement,Month) %>% 
+  summarize(n=sum(!is.na(Score))) %>% 
+  ungroup %>% 
+  filter(Measurement!="MDS_UPDRS_IV") %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>% 
+  ggplot(aes(x=factor(Month),y=n,color=Measurement,fill=Measurement)) +
+  geom_col(position="dodge") +
+  theme_bw(base_family = "Lato") +
+  facet_grid(Measurement~.,switch = "y") +
+  #scale_x_continuous(breaks=seq(0,60,12)) +
+  labs(y="Number of Observations") +
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        ) +
+  xlab("Month") +
+  scale_fill_grey() +
+  scale_color_grey()
+```
+
+```{r}
+bind_rows(Stricter=df_stricter_long,
+                         Strict=df_long, 
+                         Yearly=df_yearly_long,
+                         .id = "Criterion") %>%
+  filter(Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off")) %>% 
+  group_by(Measurement,Month,Criterion) %>% 
+  summarize(n=sum(!is.na(Score))) %>% 
+  ungroup %>% 
+  ggplot(aes(x=Month,y=n,color=Measurement,fill=Measurement)) +
+  geom_col() +
+  facet_grid(Criterion~Measurement) +
+  theme_bw(base_family = "Lato") +
+  scale_x_continuous(breaks=seq(0,60,12)) +
+  labs(title="Number of Measurements",y="Number of Observations") +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+```
+
+# Linear Models
+
+We estimate mixed linear models, with varying intercepts for each subjects, and a fixed effect of time since the start of the trial in months.
+
+## Model Fit
+```{r linear-model-fit, warning=FALSE}
+
+# Fit linear models
+df_lm_fitted <- bind_rows(Stricter=df_stricter_long,
+                         Strict=df_long, 
+                         Yearly=df_yearly_long,
+                         Factor=df_factors_long,
+                         .id = "Criterion") %>%
+  group_by(Measurement,Criterion) %>% 
+  nest(.key = "Dataset") %>%
+  mutate(lm_model=map(Dataset,~lmer(Score~Month+(1|PATNO),data=.))) 
+
+# Model coefficients
+df_lm_fitted%>% 
+  mutate(model_fit=map(lm_model,tidy)) %>% 
+  select(-Dataset,-lm_model) %>% 
+  unnest %>% 
+  arrange(term, Measurement) %>% 
+  kable(caption="Linear Mixed Model Fits")
+```
+
+## Model Criticism
+```{r linear-model-criticism, warning=FALSE}
+# Internal model quality
+if (FALSE) {
+df_lm_fitted %>%
+  mutate(model_fit=map(lm_model,glance)) %>%
+  mutate(resids = map(lm_model,augment)) %>%
+  {walk2(.$resids,paste(.$Criterion,.$Measurement),
+        function(x,title){
+          print(ggplot(x,aes(y=.resid,x=.fitted,color=Month))+
+                  geom_point()+
+                  ggtitle(paste("Residuals",title)) +
+                  theme_bw(base_family="Lato"))})}
+  
+}
+  # select(-Dataset,-lm_model) %>% 
+  # unnest
+```
+
+From the residuals, it is clear that there is some hetereoskedasticity that we do not take into account in the model. Furthermore, the normality assumptions makes less sense for parts I and II than it does for part III.
+
+# State-space models
+
+## Model Fit
+```{r fit-model}
+if (!file.exists("fitted-models.RData")) {
+df_datasets <- bind_rows(Strict=df_long, 
+                         Factors=df_factors_long,
+                         Yearly=df_yearly_long,
+                         .id = "Criterion") %>%
+  filter(Measurement!="MDS_UPDRS_IV") %>% 
+  filter(!is.na(Score)) %>% 
+  group_by(Measurement,Criterion) %>% 
+  nest(.key = "Dataset")
+
+df_models <- tibble(
+  f = rep("dlmTrend_mle",1),
+  params = list(list(GG=1))
+)
+
+# Function to apply dlm model to (long) data.frame with observations
+apply_model <- function(df,df_models) {
+  mat_in <- df %>%
+    select(PATNO,Month,Score) %>% 
+    spread(., Month, Score) %>%
+    select(-PATNO) %>%
+    as.matrix(.)
+  months <- df$Month %>% unique %>% sort
+  intervals <- months-c(-3,months[-length(months)]) # Assume start is 3 months before first measurement
+  
+  df_models  %>% 
+    mutate(Model = invoke_map(f,params,Y=mat_in,weight=intervals))
+}
+
+system.time(models <- df_datasets %>% 
+  mutate(Model = map(Dataset, apply_model, df_models=df_models)) %>% 
+  unnest(Model,.drop=FALSE) %>% 
+  mutate(params=as.character(params)))
+
+save(models,file="fitted-models.RData")
+} else {
+  load("fitted-models.RData")
+}
+```
+
+
+```{r}
+point_estimates <-
+  models %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+  mutate(obs=map_int(Dataset,~filter(.,!is.na(Score)) %>% nrow)) %>% 
+  mutate(`Log Likelihood`=LogLikelihood/obs) %>% 
+  select(-f,-params,-Model,-Dataset,-G,-obs,-LogLikelihood) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>% 
+  arrange(Measurement) %>%
+  mutate(Reliability=(W*12)/(W*12+2*V)) %>% 
+    mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="Strict")) %>% 
+  mutate(Measurement=replace(Measurement,Measurement=="UPDRS_II_combined","UPDRS_II")) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) 
+
+point_estimates %>% 
+  kable(caption="Maximum Likelihood Estimates for Linear Gaussian State-Space Model. Log likelihood is the average log likelihood.",digits = 2)
+```
+
+Part of the 'measurement' error might still be explainable by known measurement factors: such as time since last medicine intake, the examiner used, etc.
+
+## Model Criticism
+```{r check-residuals}
+df2mat <- function(df) {
+  mat_in <- df %>%
+    select(PATNO,Month,Score) %>% 
+    spread(., Month, Score) %>%
+    select(-PATNO) %>%
+    as.matrix(.)
+}
+
+smooth_var <- function(df,mod){
+  S <- df2mat(df) %>% 
+    apply(1,function(x) {dlmSmooth(x, mod$model)$s[-1,1]}) %>% 
+    t
+  SP <- df2mat(df) %>% 
+    apply(1,function(x) {dlmSvd2var(dlmSmooth(x, mod$model)$U.S,dlmSmooth(x, mod$model)$D.S) %>% transpose %>% .[[1]] %>% unlist %>% .[-1]}) %>% 
+    t
+    
+  ((S-df2mat(df))^2 + SP) %>%  
+    as.numeric() %>%  mean(na.rm=TRUE)
+}
+
+smooth_mean <- function(df,mod){
+S <- df2mat(df) %>% 
+  apply(1,function(x) {dlmSmooth(x, mod$model)$s[-1,1]}) %>% 
+  t
+(S-df2mat(df)) %>%  
+  as.numeric() %>%  mean(na.rm=TRUE)
+}
+
+if (FALSE) {
+models %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>% 
+  #arrange(Measurement) %>% 
+  #mutate(smooth_mean=map2_dbl(Dataset,Model,smooth_mean)) %>%
+  mutate(smooth_var=map2_dbl(Dataset,Model,smooth_var)) %>%
+  #mutate(innovation_var=map2_dbl(Dataset,Model,innovation_var)) %>%
+  select(-f,-params,-Model,-Dataset,-G,-Trend,-m0,-C0) %>% 
+  mutate(Ratio=smooth_var/V) %>% 
+  kable(caption="Test: Variance of various residuals")
+}
+```
+
+```{r}
+plot_resid_smoothing <- function(df, mod, title="") {
+  S <- df2mat(df) %>% 
+    apply(1,function(x) {dlmSmooth(x, mod$model)$s[-1,1]}) %>% 
+    t
+  
+  est_mean <- (S-df2mat(df)) %>% as.numeric %>% mean(na.rm=TRUE)
+  est_var <- (S-df2mat(df)) %>% as.numeric %>% var(na.rm=TRUE)
+  
+  # print((S-df2mat(df)) %>% 
+  #   as.data.frame() %>% 
+  #   gather("Time","Resid") %>% 
+  #   mutate(Time=as.numeric(Time)) %>% 
+  #   ggplot(aes(x=Time,y=Resid,group=Time)) +
+  #   geom_boxplot(na.rm=TRUE,alpha=0.3) +
+  #   ggtitle(paste("Mean:",est_mean,"Var:",est_var)) +
+  #   ggtitle(paste(title, "(smoothed - observed value)"), 
+  #           subtitle = paste("Mean:",round(est_mean,2),"Var:",round(est_var,2))) +
+  #   theme_bw(base_family = "Lato"))
+  
+  p_hist <- (S-df2mat(df)) %>%
+    as.data.frame() %>%
+    gather("Time","Resid") %>%
+    mutate(Time=as.numeric(Time)) %>%
+    ggplot(aes(x=Resid)) +
+    geom_histogram(bins = 100, na.rm=TRUE) +
+    #facet_wrap(~Time) +
+    ggtitle(paste(title),
+            subtitle = paste("Mean:",round(est_mean,2),", Variance:",round(est_var,2))) +
+      xlab("(smoothed - observed value)") +
+    theme_bw(base_family = "Lato")
+
+  
+  p_qq <- (S-df2mat(df)) %>%
+    as.data.frame() %>%
+    gather("Time","Resid") %>%
+    mutate(Resid=scale(Resid,center = TRUE,scale=TRUE)) %>% 
+    ggplot(aes(sample=Resid)) +
+    stat_qq(na.rm = TRUE) +
+      geom_abline(slope=1) +
+      ggtitle("",
+            subtitle = "Normal QQ plot") +
+    theme_bw(base_family = "Lato")
+  
+  gridExtra::grid.arrange(p_hist,p_qq,nrow=1, ncol=2)
+  
+}
+```
+
+
+```{r, fig.height=3, fig.width=6}
+if (TRUE) {
+models %>% 
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="Strict")) %>%
+    filter((Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Strict") |
+            (Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off") & Criterion=="Yearly")) %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+    mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>% 
+  {pwalk(list(.$Dataset,.$Model,paste(.$Measurement)),plot_resid_smoothing)}
+}
+```
+```{r check-outliers}
+plot_resid_smoothing <- function(df, mod, title="") {
+  S <- df2mat(df) %>% 
+    apply(1,function(x) {dlmSmooth(x, mod$model)$s[-1,1]}) %>% 
+    t
+  
+  est_mean <- (S-df2mat(df)) %>% as.numeric %>% mean(na.rm=TRUE)
+  est_var <- (S-df2mat(df)) %>% as.numeric %>% var(na.rm=TRUE)
+  
+  outliers <- (S-df2mat(df)) %>%
+  {(.-mean(as.numeric(.),na.rm=TRUE))/sd(as.numeric(.),na.rm=TRUE)} %>%
+  {which(abs(.)>4,arr.ind=TRUE)}
+  
+  #print(outliers)
+  
+  numcol <-(S-df2mat(df)) %>%
+  {(.-mean(as.numeric(.),na.rm=TRUE))/sd(as.numeric(.),na.rm=TRUE)} %>%
+  {abs(.)>4} %>% as.logical
+  #mutate(Outlier=c(rep("Random",10),rep("Outlier",length(unique(outliers[,1])))))
+  
+  df_vis <- df %>%
+    select(PATNO,Month,Score) %>% 
+    spread(., Month, Score) %>% 
+    #slice(c(1:10,unique(outliers[,1]))) %>% 
+     #%>% 
+    gather("Month","Value",-PATNO) %>% 
+    mutate(Outlier=numcol)
+  
+  patno_outlier <- df_vis %>% 
+    group_by(PATNO) %>% 
+    summarize(Outlier=any(Outlier)) %>% 
+    ungroup %>% 
+    filter(Outlier) %>% 
+    .$PATNO
+  
+  patno_random <- df_vis %>% 
+    group_by(PATNO) %>% 
+    summarize(Outlier=any(Outlier)) %>% 
+    ungroup %>% 
+    filter(!Outlier) %>% 
+    .$PATNO
+  
+  print(df_vis %>% 
+    filter(PATNO %in% c(sample(patno_random,10),patno_outlier)) %>% 
+    ggplot(aes(x=Month,y=Value,group=PATNO)) +
+    geom_line(na.rm=TRUE) +
+    geom_point(aes(color=Outlier),alpha=0.5,na.rm=TRUE)+
+      ggtitle(title))
+}
+
+if (TRUE) {
+models %>% 
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="Strict")) %>%
+    #filter((Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="All") |
+     #       (Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off") & Criterion=="Yearly")) %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+    mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>% 
+  {pwalk(list(.$Dataset,.$Model,paste(.$Measurement)),plot_resid_smoothing)}
+}
+```
+
+
+The normalized distributions of the residuals have thicker tails than the normal distribution and paticularly part I shows a skew which probably corresponds to the floor effect of the measurements.
+
+```{r}
+# Plot innovations (one-step-ahead prediction - observed value)
+plot_resid_innovation <- function(df, mod,title="") {
+  S <- df2mat(df) %>% 
+    apply(1,function(x) {dlmFilter(x, mod$model)$f}) %>% 
+    t
+  
+  est_mean <- (S-df2mat(df)) %>% as.numeric %>% mean(na.rm=TRUE)
+  est_var <- (S-df2mat(df)) %>% as.numeric %>% var(na.rm=TRUE)
+  
+  
+  print((S-df2mat(df)) %>% 
+    as.data.frame() %>% 
+    gather("Time","Resid") %>% 
+    mutate(Time=as.numeric(as.character(Time))) %>% 
+    ggplot(aes(x=Time, y=Resid,group=Time)) +
+    geom_boxplot(alpha=0.3,na.rm=TRUE) +
+    #facet_wrap(~Time) +
+    ggtitle(paste(title,"Innovations (one-step-ahead prediction - observed value)"), 
+            subtitle = paste("Mean:",round(est_mean,2),"Var:",round(est_var,2))) +
+    theme_bw(base_family = "Lato"))
+  
+  print((S-df2mat(df)) %>%
+    as.data.frame() %>%
+    gather("Time","Resid") %>%
+    mutate(Time=as.numeric(as.character(Time))) %>%
+    ggplot(aes(x=Resid,group=Time)) +
+    geom_histogram(na.rm=TRUE) +
+    facet_wrap(~Time) +
+    ggtitle(paste(title,"Innovations (one-step-ahead prediction - observed value)"),
+            subtitle = paste("Mean:",round(est_mean,2),"Var:",round(est_var,2))) +
+    theme_bw(base_family = "Lato"))
+    
+}
+#plot_resid_innovation(models$Dataset[[1]],models$Model[[1]])  
+```
+
+
+```{r}
+if (FALSE) {
+models %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>%   
+  {pwalk(list(.$Dataset,.$Model,paste(.$Criterion,.$Measurement)),plot_resid_innovation)} 
+}
+```
+
+```{r check-outliers-one-step-ahead}
+plot_resid_smoothing <- function(df, mod, title="") {
+S <- df2mat(df) %>% 
+    apply(1,function(x) {dlmFilter(x, mod$model)$f}) %>% 
+    t
+  
+  est_mean <- (S-df2mat(df)) %>% as.numeric %>% mean(na.rm=TRUE)
+  est_var <- (S-df2mat(df)) %>% as.numeric %>% var(na.rm=TRUE)
+  
+  outliers <- (S-df2mat(df)) %>%
+  {(.-mean(as.numeric(.),na.rm=TRUE))/sd(as.numeric(.),na.rm=TRUE)} %>%
+  {which(abs(.)>4,arr.ind=TRUE)}
+  
+  #print(outliers)
+  
+  numcol <-(S-df2mat(df)) %>%
+  {(.-mean(as.numeric(.),na.rm=TRUE))/sd(as.numeric(.),na.rm=TRUE)} %>%
+  {abs(.)>4} %>% as.logical
+  #mutate(Outlier=c(rep("Random",10),rep("Outlier",length(unique(outliers[,1])))))
+  
+  df_vis <- df %>%
+    select(PATNO,Month,Score) %>% 
+    spread(., Month, Score) %>% 
+    #slice(c(1:10,unique(outliers[,1]))) %>% 
+     #%>% 
+    gather("Month","Value",-PATNO) %>% 
+    mutate(Outlier=numcol)
+  
+  patno_outlier <- df_vis %>% 
+    group_by(PATNO) %>% 
+    summarize(Outlier=any(Outlier)) %>% 
+    ungroup %>% 
+    filter(Outlier) %>% 
+    .$PATNO
+  
+  patno_random <- df_vis %>% 
+    group_by(PATNO) %>% 
+    summarize(Outlier=any(Outlier)) %>% 
+    ungroup %>% 
+    filter(!Outlier) %>% 
+    .$PATNO
+  
+  print(df_vis %>% 
+    filter(PATNO %in% c(sample(patno_random,10),patno_outlier)) %>% 
+    ggplot(aes(x=Month,y=Value,group=PATNO)) +
+    geom_line() +
+    geom_point(aes(color=Outlier),alpha=0.5)+
+      ggtitle(title))
+}
+
+if (FALSE) {
+models %>% 
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="All")) %>%
+    #filter((Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="All") |
+     #       (Measurement %in% c("MDS_UPDRS_III_on","MDS_UPDRS_III_off") & Criterion=="Yearly")) %>% 
+  mutate(Properties=map(Model,glance)) %>% 
+  unnest(Properties) %>% 
+    mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>% 
+  distinct(Measurement,Criterion,.keep_all = TRUE) %>% 
+  {pwalk(list(.$Dataset,.$Model,paste(.$Measurement)),plot_resid_smoothing)}
+}
+```
+
+# Bootstrap Results
+```{r bootstrap-load, cache=TRUE}
+load("dlm_estimates_ppmi.RData")
+
+# Needed to draw MLE estimates later
+results_models <- models %>% 
+  mutate(Properties=map(Model,tidy)) %>% 
+  unnest(Properties) %>%
+  select(Measurement,Criterion,term,estimate) %>% 
+  spread(term,estimate) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  gather("term","estimate",-Measurement,-Criterion) %>% 
+  mutate(Measurement=paste(Measurement,Criterion)) %>% 
+  select(-Criterion) %>% 
+  mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_",""))
+
+# Get the bootstrap estimates in suitable form
+models_bootstrapped$Model <- map(models_bootstrapped$Model,bind_rows)
+bootstrap_values <- models_bootstrapped %>%
+  mutate(Measurement=paste(Measurement,Criterion)) %>% 
+  select(-Criterion) %>% 
+  unnest(Model,.drop=FALSE) %>% 
+  mutate(params=as.character(params)) %>% 
+  mutate(Properties=map(Model,tidy,conf=FALSE)) %>% 
+  unnest(Properties) %>% 
+  filter(term!="G")
+```
+
+
+```{r process-factors, cache=TRUE}
+load("dlm_estimates_ppmi-factors.RData")
+models_bootstrapped_factors$Model <- map(models_bootstrapped_factors$Model,bind_rows)
+bootstrap_values_factors <- models_bootstrapped_factors %>%
+  unnest(Model,.drop=FALSE) %>% 
+  mutate(params=as.character(params)) %>% 
+  mutate(Properties=map(Model,tidy,conf=FALSE)) %>% 
+  unnest(Properties) %>% 
+  filter(term!="G") %>% 
+  mutate(Measurement=paste(Measurement,"Factors"))
+```
+
+```{r bootstrap-table}
+pre_table <- bootstrap_values %>%
+  select(Measurement,rep,term,estimate,f,params) %>% 
+  spread(term,estimate) %>% 
+  mutate(Reliability=(12*W)/(12*W+2*V)) %>% 
+  filter(W<8) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  gather("term","estimate",-Measurement,-f,-params,-rep) %>% 
+  separate(Measurement,c("Measurement","Criterion"),sep=" ") %>%
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="All")) %>% 
+  mutate(Measurement=replace(Measurement,Measurement=="UPDRS_II_combined","UPDRS_II")) %>% 
+  mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_","")) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  group_by(term,Measurement,Criterion) %>% 
+  summarize(q025=quantile(estimate,0.025),q50=median(estimate),q975=quantile(estimate,0.975)) %>% 
+  ungroup %>% 
+  select(-Criterion) %>% 
+  left_join(point_estimates %>% 
+              gather("term","estimate",-Measurement,-Criterion) %>% 
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")),by=c("term","Measurement")) %>% 
+  mutate(value=sprintf("%2.2f (%2.2f–%2.2f)",estimate,q025,q975)) %>% 
+  select(Measurement,Criterion,term,value) %>% 
+  spread(term,value) %>% 
+  arrange(Measurement,Criterion) %>% 
+  filter(Measurement %in% c("I","II","III off","III on"))
+  
+
+pre_table %>% select(Measurement,V,W,Trend,Reliability) %>% 
+  kable(caption="Estimated Parameters with bootstrapped confidence intervals (1000 repeats).")
+pre_table %>% 
+  left_join(point_estimates %>% 
+              select(Measurement,Criterion,`Log Likelihood`) %>%
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")),
+            by = c("Measurement", "Criterion")) %>% 
+  select(Measurement,V,W,Trend,m0,C0,Reliability,`Log Likelihood`) %>% 
+  mutate(`Log Likelihood`=sprintf("%2.2f",`Log Likelihood`)) %>% 
+  kable(caption="Estimated Parameters with bootstrapped confidence intervals (1000 repeats).")
+```
+
+```{r bootstrap-table-factors}
+pre_table <- bootstrap_values_factors %>% 
+  select(Measurement,rep,term,estimate,f,params) %>% 
+  spread(term,estimate) %>% 
+  mutate(Reliability=(12*W)/(12*W+2*V)) %>% 
+  filter(W<8) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  gather("term","estimate",-Measurement,-f,-params,-rep) %>% 
+  separate(Measurement,c("Measurement","Criterion"),sep=" ") %>%
+  filter(Measurement!="PC3") %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I","MDS_UPDRS_II") & Criterion=="Yearly")) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_III_off","MDS_UPDRS_III_on") & Criterion=="All")) %>% 
+  mutate(Measurement=replace(Measurement,Measurement=="UPDRS_II_combined","UPDRS_II")) %>% 
+  mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_","")) %>% 
+  mutate(Measurement=str_replace_all(Measurement,"_"," ")) %>%
+  group_by(term,Measurement,Criterion) %>% 
+  summarize(q025=quantile(estimate,0.025),q50=median(estimate),q975=quantile(estimate,0.975)) %>% 
+  ungroup %>% 
+  select(-Criterion) %>% 
+  left_join(point_estimates %>% 
+              gather("term","estimate",-Measurement,-Criterion) %>% 
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")),by=c("term","Measurement")) %>% 
+  mutate(value=sprintf("%2.2f (%2.2f–%2.2f)",estimate,q025,q975)) %>% 
+  select(Measurement,Criterion,term,value) %>% 
+  spread(term,value) %>% 
+  arrange(Measurement,Criterion)
+
+pre_table %>% select(Measurement,V,W,Trend,Reliability) %>% 
+  kable(caption="Estimated Parameters with bootstrapped confidence intervals (1000 repeats).")
+pre_table %>% 
+  left_join(point_estimates %>% 
+              select(Measurement,Criterion,`Log Likelihood`) %>%
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")),
+            by = c("Measurement", "Criterion")) %>% 
+  select(Measurement,V,W,Trend,m0,C0,Reliability,`Log Likelihood`) %>% 
+  mutate(`Log Likelihood`=sprintf("%2.2f",`Log Likelihood`)) %>% 
+  kable(caption="Estimated Parameters with bootstrapped confidence intervals (1000 repeats).")
+```
+
+```{r bootstrap-histogram}
+# bootstrap_values %>% 
+#   spread(term,estimate) %>% 
+#   gather("term","estimate",-Measurement,-f,-params,-rep) %>% 
+#   #filter(!(Measurement %in% c("MCATOT","MDS_UPDRS_IV"))) %>% 
+#   mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_","")) %>% 
+#   filter((Measurement %in% c("I All","II All","I Yearly","II Yearly"))) %>% 
+#   #mutate(Measurement=str_replace(Measurement," Strict","")) %>% 
+#   ggplot(aes(x=estimate)) +
+#   geom_histogram(bins=80) +
+#   geom_vline(aes(xintercept=estimate), 
+#              data=results_models %>% 
+#                filter((Measurement %in% c("I All","II All","I Yearly","II Yearly"))) %>%  
+#                filter(term!="G"),
+#              color="blue",alpha=0.4) +
+#   facet_grid(Measurement~term,scales="free_x") +
+#   theme_bw(base_family = "Lato") +
+#   theme(panel.grid=element_blank()) +
+#   ggtitle("Naive Bootstrap Intervals",subtitle = "Blue Line depicts maximum likelihood estimate on all data") +
+#   ylab("") +
+#   xlab("")
+```
+
+
+```{r, fig.height=7, fig.width=10}
+bootstrap_values %>% 
+  select(Measurement,rep,term,estimate,f,params) %>% 
+  spread(term,estimate) %>% 
+  #filter(W<8) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  gather("term","estimate",-Measurement,-f,-params,-rep) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I Yearly","MDS_UPDRS_II Yearly","MDS_UPDRS_III_off All","PC3 Factors"))) %>%
+  separate(Measurement,c("Measurement","Criterion"),sep=" ") %>% 
+  mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_","")) %>%  
+  mutate(Measurement=str_replace(Measurement,"_"," ")) %>% 
+  mutate(Measurement=str_replace(Measurement,"UPDRS II_combined","UPDRS II")) %>% 
+  filter(Measurement %in% c("I","II","III off","III on")) %>% 
+  ggplot(aes(x=estimate)) +
+  geom_histogram(bins=80) +
+  geom_vline(aes(xintercept=estimate), data=
+               point_estimates %>% 
+              gather("term","estimate",-Measurement,-Criterion) %>% 
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")) %>% 
+               filter(!str_detect(Measurement,"UPDRS")) %>% 
+               filter(!(term %in% c("Log Likelihood","Reliability"))) %>% 
+               filter(Measurement %in% c("I","II","III off","III on")),
+             color="red",alpha=0.7) +
+  facet_wrap(Measurement~term,scales="free",ncol=5) +
+  theme_bw(base_family = "Lato") +
+  theme(panel.grid=element_blank()) +
+  ggtitle("Naive Bootstrap Intervals (Individual Scales)",subtitle = "Red Line depicts maximum likelihood estimate on all data") +
+  ylab("") +
+  xlab("") +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+```
+
+```{r, fig.height=22, fig.width=10}
+bootstrap_values_factors %>% 
+  select(Measurement,rep,term,estimate,f,params) %>% 
+  spread(term,estimate) %>% 
+  #filter(W<8) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  gather("term","estimate",-Measurement,-f,-params,-rep) %>% 
+  filter(!(Measurement %in% c("MDS_UPDRS_I Yearly","MDS_UPDRS_II Yearly","MDS_UPDRS_III_off All","PC3 Factors"))) %>%
+  separate(Measurement,c("Measurement","Criterion"),sep=" ") %>% 
+  mutate(Measurement=str_replace(Measurement,"MDS_UPDRS_","")) %>%  
+  mutate(Measurement=str_replace(Measurement,"_"," ")) %>% 
+  mutate(Measurement=str_replace(Measurement,"UPDRS II_combined","UPDRS II")) %>% 
+  ggplot(aes(x=estimate)) +
+  geom_histogram(bins=80) +
+  geom_vline(aes(xintercept=estimate), data=
+               point_estimates %>% 
+              gather("term","estimate",-Measurement,-Criterion) %>% 
+              mutate(Measurement=str_replace(Measurement,"MDS UPDRS ","")) %>% 
+               filter(!str_detect(Measurement,"UPDRS")) %>% 
+               filter(!(term %in% c("Log Likelihood","Reliability"))) %>% 
+               filter(!(Measurement %in% c("I","II","III off","III on"))),
+             color="red",alpha=0.7) +
+  facet_wrap(Measurement~term,scales="free",ncol=5) +
+  theme_bw(base_family = "Lato") +
+  theme(panel.grid=element_blank()) +
+  ggtitle("Naive Bootstrap Intervals (Individual Scales)",subtitle = "Red Line depicts maximum likelihood estimate on all data") +
+  ylab("") +
+  xlab("") +
+  theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+```
+
+## Comparing the Strict and Stricter Criterion
+
+```{r}
+load("dlm_estimates_ppmi-compare.RData")
+
+bootstrap_values_compare <- models_bootstrapped_compare %>% 
+  bind_rows %>% 
+  select(-f,-params) %>% 
+  mutate(Properties=map(Model,tidy,conf=FALSE)) %>% 
+  unnest(Properties) %>% 
+  filter(term!="G")
+
+bootstrap_values_compare %>% 
+  group_by(rep,term) %>% 
+  group_by(Level,term) %>% 
+  summarize(estimate=median(estimate)) %>% 
+  ungroup %>% 
+  arrange(term) %>% 
+  spread(Level,estimate) %>% 
+  kable(caption = "Median of the bootstrap estimates")
+
+bootstrap_values_compare %>% 
+  select(-Model) %>% 
+  spread(term,estimate) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  mutate(Reliability=W/(W+2*V)) %>% 
+  gather("term","estimate",-Level,-rep) %>% 
+  group_by(rep,term) %>% 
+  arrange(rep,term,Level) %>% 
+  summarize(difference=estimate[1]-estimate[2]) %>% 
+  ungroup %>% 
+  ggplot(aes(x=difference)) +
+  geom_histogram(bins=80) +
+  facet_wrap(~term,scales="free_x") +
+  theme_bw() +
+  xlab("(6 hour threshold estimate) - (14 hour threshold estimate)") +
+    theme(legend.position = "none",
+        legend.background = element_rect(colour = "black",size = 0.1),
+        panel.grid.major = element_line(linetype = 2, size=0.2),
+        panel.grid.minor = element_line(linetype = 2, size=0.2),
+        panel.border = element_blank(),
+        axis.line = element_line(linetype=1,color="black",size=0.5),
+        strip.background = element_rect(fill=NA,color=NA),
+        strip.text = element_text(face="bold")
+        )
+
+bootstrap_values_compare %>% 
+  select(-Model) %>% 
+  spread(term,estimate) %>% 
+  mutate(W=12*W) %>% 
+  mutate(Trend=12*Trend) %>% 
+  mutate(Reliability=W/(W+2*V)) %>% 
+  gather("term","estimate",-Level,-rep) %>% 
+  group_by(rep,term) %>%
+  arrange(rep,term,Level) %>% 
+  summarize(difference=estimate[1]-estimate[2]) %>% 
+  ungroup %>% 
+  spread(term,difference) %>% 
+  gather("term","estimate",-rep) %>% 
+  #filter(!(Measurement %in% c("MCATOT","MDS_UPDRS_IV"))) %>% 
+  group_by(term) %>% 
+  summarize(q025=quantile(estimate,0.025),q50=median(estimate),q975=quantile(estimate,0.975)) %>% 
+  ungroup %>% 
+  mutate(value=sprintf("%2.2f (%2.2f–%2.2f)",q50,q025,q975)) %>% 
+  select(term,value) %>% 
+  spread(term,value) %>% 
+  kable(caption="Estimated Parameters with bootstrap confidence intervals (1000 repeats).")
+```
+
+Table shows the difference in the estimates: Strict-Stricter
+
